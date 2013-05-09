@@ -25,6 +25,8 @@ class CaptureGraphicsDevice
 {
     public static version = 1;
 
+    public precision = 0.000001;
+
     gd:         any;
     current:    number[];
     frames:     any[];
@@ -33,9 +35,12 @@ class CaptureGraphicsDevice
     lastId:     number;
     recycledIds: number[];
     destroyedIds: number[];
-    data:       {};
+    integerData:    {};
+    floatData:      {};
     objects:    {};
     objectArray: any[];
+    names:      {};
+    numNames:   number;
     vertexBuffers: {};
     indexBuffers: {};
     techniqueParameterBuffers: {};
@@ -81,9 +86,12 @@ class CaptureGraphicsDevice
         this.lastId = -1;
         this.recycledIds = [];
         this.destroyedIds = [];
-        this.data = {};
+        this.integerData = {};
+        this.floatData = {};
         this.objects = {};
         this.objectArray = [];
+        this.names = {};
+        this.numNames = 0;
         this.vertexBuffers = {};
         this.indexBuffers = {};
         this.techniqueParameterBuffers = {};
@@ -129,10 +137,11 @@ class CaptureGraphicsDevice
     {
         var lowerIndex;
 
-        var dataBin = this.data[length];
+        var dataBins = (integers ? this.integerData : this.floatData);
+        var dataBin = dataBins[length];
         if (dataBin === undefined)
         {
-            this.data[length] = dataBin = [];
+            dataBins[length] = dataBin = [];
             lowerIndex = 0;
         }
         else
@@ -143,8 +152,7 @@ class CaptureGraphicsDevice
             }
             else
             {
-                var threshold = (length > 16 ? 0.001 : 0.00001);
-                lowerIndex = this._lowerBound(dataBin, data, length, this._compareFloatArrays, threshold);
+                lowerIndex = this._lowerBound(dataBin, data, length, this._compareFloatArrays, this.precision);
             }
 
             // Check if we found an identical copy
@@ -156,14 +164,92 @@ class CaptureGraphicsDevice
         }
 
         var clonedData;
-        if (data.slice)
+        if (integers)
         {
-            clonedData = data.slice(0, length);
+            if (data.BYTES_PER_ELEMENT)
+            {
+                // must be a typed array
+                if (length < data.length)
+                {
+                    clonedData = new data.constructor(data.subarray(0, length));
+                }
+                else
+                {
+                    clonedData = new data.constructor(data);
+                }
+            }
+            else
+            {
+                // Find extents to choose best container
+                var min = data[0];
+                var max = data[0];
+                var n;
+                for (n = 1; n < length; n += 1)
+                {
+                    var value = data[n];
+                    if (min > value)
+                    {
+                        min = value;
+                    }
+                    else if (max < value)
+                    {
+                        max = value;
+                    }
+                }
+
+                var typedConstructor;
+                if (0 <= min && max <= 255)
+                {
+                    typedConstructor = Uint8Array;
+                }
+                else if (-128 <= min && max <= 127)
+                {
+                    typedConstructor = Int8Array;
+                }
+                else if (0 <= min && max <= 65535)
+                {
+                    typedConstructor = Uint16Array;
+                }
+                else if (-32768 <= min && max <= 32767)
+                {
+                    typedConstructor = Int16Array;
+                }
+                else if (0 <= min)
+                {
+                    typedConstructor = Uint32Array;
+                }
+                else
+                {
+                    typedConstructor = Int32Array;
+                }
+
+                if (length < data.length)
+                {
+                    clonedData = new typedConstructor(data.slice(0, length));
+                }
+                else
+                {
+                    clonedData = new typedConstructor(data);
+                }
+            }
         }
         else
         {
-            // must be a typed array
-            clonedData = new data.constructor(data);
+            if (length < data.length)
+            {
+                if (data.subarray)
+                {
+                    clonedData = new Float32Array(data.subarray(0, length));
+                }
+                else
+                {
+                    clonedData = new Float32Array(data.slice(0, length));
+                }
+            }
+            else
+            {
+                clonedData = new Float32Array(data);
+            }
         }
 
         var id = this._getIntegerId();
@@ -180,10 +266,9 @@ class CaptureGraphicsDevice
         return id.toString();
     }
 
-    private _addCommand(...args: any[]): void
+    private _addCommand(method, arg1?, arg2?, arg3?, arg4?, arg5?): void
     {
-        var length = args.length;
-        var method = args[0];
+        var length = arguments.length;
 
         var lowerIndex;
 
@@ -195,7 +280,7 @@ class CaptureGraphicsDevice
         }
         else
         {
-            lowerIndex = this._lowerBound(commandsBin, args, length, this._compareGenericArrays, 1);
+            lowerIndex = this._lowerBound(commandsBin, arguments, length, this._compareGenericArrays, 1);
 
             // Check if we found an identical copy
             if (lowerIndex < 0)
@@ -212,7 +297,7 @@ class CaptureGraphicsDevice
         command[0] = method;
         for (a = 1; a < length; a += 1)
         {
-            command[a] = args[a];
+            command[a] = arguments[a];
         }
 
         var cmdId = this._getCommandId();
@@ -242,7 +327,7 @@ class CaptureGraphicsDevice
                 value = object[p];
                 if (value !== undefined && value !== null)
                 {
-                    objectArray.push(p, this._clone(value));
+                    objectArray.push(this._addName(p), this._clone(value));
                 }
             }
         }
@@ -256,6 +341,7 @@ class CaptureGraphicsDevice
         var n, value;
         for (n = 0; n < length; n += 2)
         {
+            objectArray[n] = this._addName(objectArray[n]);
             value = objectArray[n + 1];
             if (value !== undefined && value !== null)
             {
@@ -283,6 +369,18 @@ class CaptureGraphicsDevice
             data[j + 2] = k;
             data[j + 3] = v;
         }
+    }
+
+    private _addName(name: string) : number
+    {
+        var nameId = this.names[name];
+        if (nameId === undefined)
+        {
+            nameId = this.numNames;
+            this.numNames += 1;
+            this.names[name] = nameId;
+        }
+        return nameId;
     }
 
     private _addObject(object) : string
@@ -354,9 +452,9 @@ class CaptureGraphicsDevice
 
         if (object.BYTES_PER_ELEMENT)
         {
-            if (raw)
+            length = object.length;
+            if (raw || length == 0)
             {
-                length = object.length;
                 result = new Array(length);
                 for (index = 0; index < length; index += 1)
                 {
@@ -368,14 +466,14 @@ class CaptureGraphicsDevice
             {
                 var integers = !(object instanceof Float32Array ||
                                  object instanceof Float64Array);
-                return this._addData(object, object.length, integers);
+                return this._addData(object, length, integers);
             }
         }
 
         if (object instanceof Array)
         {
             length = object.length;
-            if (!raw)
+            if (!raw && length !== 0)
             {
                 for (index = 0; index < length; index += 1)
                 {
@@ -621,7 +719,7 @@ class CaptureGraphicsDevice
         this.gd.setTechniqueParameters(techniqueParameters);
     };
 
-    private _lowerBound(bin: any[], data: any[], length: number, comp: Function, config: number) : number
+    private _lowerBound(bin: any[], data: any, length: number, comp: Function, config: number) : number
     {
         var first: number = 0;
         var count: number = (bin.length >>> 1); // Bin elements ocupy two slots, divide by 2
@@ -698,9 +796,10 @@ class CaptureGraphicsDevice
     private _equalFloatArrays(a, b, length) : bool
     {
         var n = 0;
+        var threshold = this.precision;
         do
         {
-            if (Math.abs(a[n] - b[n]) >= 0.00001)
+            if (Math.abs(a[n] - b[n]) >= threshold)
             {
                 return false;
             }
@@ -1071,12 +1170,15 @@ class CaptureGraphicsDevice
             };
             captureWriter['end'] = function captureEndDrawWriter()
             {
-                self._addCommand(CaptureGraphicsCommand.beginEndDraw,
-                                 primitive,
-                                 numVertices,
-                                 self._cloneVertexFormats(formats),
-                                 semantics._id,
-                                 self._addData(data, data.length, false));
+                if (0 < numVertices)
+                {
+                    self._addCommand(CaptureGraphicsCommand.beginEndDraw,
+                                     primitive,
+                                     numVertices,
+                                     self._cloneVertexFormats(formats),
+                                     semantics._id,
+                                     self._addData(data, data.length, false));
+                }
             };
             captureWriter['proxy'] = writer;
             return captureWriter;
@@ -1225,7 +1327,7 @@ class CaptureGraphicsDevice
                                      id,
                                      self._addData(data, (numVertices * this.stride), false));
                 }
-                else
+                else (0 < numVertices)
                 {
                     self._addCommand(CaptureGraphicsCommand.setData,
                                      id,
@@ -1279,7 +1381,7 @@ class CaptureGraphicsDevice
                                              id,
                                              self._addData(data, data.length, false));
                         }
-                        else
+                        else if (0 < numVertices)
                         {
                             self._addCommand(CaptureGraphicsCommand.setData,
                                              id,
@@ -1357,7 +1459,7 @@ class CaptureGraphicsDevice
                                      id,
                                      self._addData(data, numIndices, true));
                 }
-                else
+                else if (0 < numIndices)
                 {
                     self._addCommand(CaptureGraphicsCommand.setData,
                                      id,
@@ -1392,7 +1494,7 @@ class CaptureGraphicsDevice
                                              id,
                                              self._addData(data, numIndices, true));
                         }
-                        else
+                        else if (0 < numIndices)
                         {
                             self._addCommand(CaptureGraphicsCommand.setData,
                                              id,
@@ -1461,8 +1563,7 @@ class CaptureGraphicsDevice
             texture.setData = function captureTSetData(data)
             {
                 var integers = !(data instanceof Float32Array ||
-                                 data instanceof Float64Array ||
-                                 data instanceof Array);
+                                 data instanceof Float64Array);
                 self._addCommand(CaptureGraphicsCommand.setAllData,
                                  id,
                                  self._addData(data, data.length, integers));
@@ -1473,8 +1574,7 @@ class CaptureGraphicsDevice
             {
                 var data = params.data;
                 var integers = !(data instanceof Float32Array ||
-                                 data instanceof Float64Array ||
-                                 data instanceof Array);
+                                 data instanceof Float64Array);
                 this._addCommand(CaptureGraphicsCommand.setAllData,
                                  id,
                                  this._addData(data, data.length, integers));
@@ -1675,7 +1775,7 @@ class CaptureGraphicsDevice
             var data = params.data;
             this._addCommand(CaptureGraphicsCommand.setAllData,
                              id,
-                             this._addData(data, data.length, true));
+                             this._addData(data, data.length, false));
             delete params.data;
         }
         this.techniqueParameterBuffers[id] = this._cloneObject(params, true);
@@ -1790,11 +1890,92 @@ class CaptureGraphicsDevice
     // Capture device API
     public getFramesString()
     {
+        var framesString = '{"version":1,';
+
+        framesString += '"names":[';
+        var names = this.names;
+        var numNames = this.numNames;
+        var namesArray = new Array(numNames);
+        var p;
+        for (p in names)
+        {
+            if (names.hasOwnProperty(p))
+            {
+                namesArray[names[p]] = p;
+            }
+        }
+        var n;
+        for (n = 0; n < numNames; n += 1)
+        {
+            if (n)
+            {
+                framesString += ',';
+            }
+            framesString += '"' + namesArray[n] + '"';
+        }
+
+        framesString += '],"objects":[';
+        var objects = this.objects;
+        var addValuesComma = false;
+        var objectsBin, object, binLength, id, j, valueInt;
+        for (p in objects)
+        {
+            if (objects.hasOwnProperty(p))
+            {
+                objectsBin = objects[p];
+                binLength = objectsBin.length;
+                for (n = 0; n < binLength; n += 2)
+                {
+                    id = objectsBin[n];
+                    object = objectsBin[n + 1];
+                    length = object.length;
+                    if (addValuesComma)
+                    {
+                        framesString += ',';
+                    }
+                    else
+                    {
+                        addValuesComma = true;
+                    }
+                    framesString += id + ',[';
+                    for (j = 0; j < length; j += 1)
+                    {
+                        if (j)
+                        {
+                            framesString += ',';
+                        }
+                        var value = object[j];
+                        if (typeof value === "string")
+                        {
+                            framesString += '"' + value + '"';
+                        }
+                        else if (typeof value === "number")
+                        {
+                            valueInt = (value | 0);
+                            if (valueInt === value)
+                            {
+                                framesString += valueInt;
+                            }
+                            else
+                            {
+                                framesString += value.toFixed(4).replace(/\.?0+$/, '');
+                            }
+                        }
+                        else
+                        {
+                            framesString += value;
+                        }
+                    }
+                    framesString += ']';
+                }
+            }
+        }
+
         var commands = this.commands;
         var numMethods = commands.length;
         var numCommands = this.numCommands;
         var commandsArray = new Array(numCommands);
-        var p, n, commandsBin, length;
+        var commandsBin, length;
         for (p = 0; p < numMethods; p += 1)
         {
             commandsBin = commands[p];
@@ -1808,7 +1989,7 @@ class CaptureGraphicsDevice
             }
         }
 
-        var framesString = '{"version":1,"commands":[';
+        framesString += '],"commands":[';
         for (n = 0; n < numCommands; n += 1)
         {
             if (n)
@@ -1819,7 +2000,7 @@ class CaptureGraphicsDevice
             framesString += '[';
             var command = commandsArray[n];
             var numArguments = command.length;
-            var a, value, valueInt;
+            var a, value;
             for (a = 0; a < numArguments; a += 1)
             {
                 value = command[a];
@@ -1868,14 +2049,49 @@ class CaptureGraphicsDevice
             framesString += '[' + frames[n].join(',') + ']';
         }
         framesString += ']}';
+
         return framesString;
     }
 
-    public getDataString()
+    private _getDataBinSize(dataBins: {}, integers: bool) : number
     {
-        var dataString = '{"version":1,"data":[';
-        var addValuesComma = false;
-        var dataBins = this.data;
+        var totalSize = 0;
+        var p, dataBin, binLength, n, data;
+        for (p in dataBins)
+        {
+            if (dataBins.hasOwnProperty(p))
+            {
+                dataBin = dataBins[p];
+                binLength = dataBin.length;
+                if (binLength === 0)
+                {
+                    continue;
+                }
+
+                totalSize += 4; // number of arrays on this bin
+                totalSize += 4; // length of each array on this bin
+
+                for (n = 0; n < binLength; n += 2)
+                {
+                    data = dataBin[n + 1];
+
+                    totalSize += 4; // id
+                    if (integers)
+                    {
+                        totalSize += 4; // type
+                    }
+
+                    // pad element size to multiple of 4
+                    totalSize += ((data.byteLength + 3) & 0x7ffffffc);
+                }
+            }
+        }
+        totalSize += 4; // sentinel
+        return totalSize;
+    }
+
+    private _getDataBinBuffer(ints: any, offset: number, dataBins: {}, integers: bool) : number
+    {
         var p, dataBin, binLength, n, j;
         for (p in dataBins)
         {
@@ -1883,134 +2099,112 @@ class CaptureGraphicsDevice
             {
                 dataBin = dataBins[p];
                 binLength = dataBin.length;
-                var id, data, length, value, valueInt;
+                if (binLength === 0)
+                {
+                    continue;
+                }
+
+                ints[offset] = (binLength >>> 1);
+                offset += 1;
+
+                ints[offset] = parseInt(p, 10);
+                offset += 1;
+
+                var id, data, length, type, value, valueInt;
                 for (n = 0; n < binLength; n += 2)
                 {
-                    id = dataBin[n];
+                    ints[offset] = dataBin[n]; // id
+                    offset += 1;
+
                     data = dataBin[n + 1];
                     length = data.length;
 
-                    if (addValuesComma)
+                    if (integers)
                     {
-                        dataString += ',';
-                    }
-                    else
-                    {
-                        addValuesComma = true;
-                    }
-
-                    dataString += id + ',[';
-
-                    if (data instanceof Array ||
-                        data instanceof Float32Array ||
-                        data instanceof Float64Array)
-                    {
-                        for (j = 0; j < length; j += 1)
+                        if (data instanceof Uint8Array)
                         {
-                            if (j)
-                            {
-                                dataString += ',';
-                            }
-                            value = data[j];
-                            valueInt = (value | 0);
-                            if (Math.abs(valueInt - value) < 0.00001)
-                            {
-                                dataString += valueInt;
-                            }
-                            else
-                            {
-                                if (length <= 16)
-                                {
-                                    if (Math.abs(value) < 0.001)
-                                    {
-                                        dataString += value.toExponential(2).replace(/\.?0+e/, 'e');
-                                    }
-                                    else
-                                    {
-                                        dataString += value.toFixed(5).replace(/\.?0+$/, '');
-                                    }
-                                }
-                                else
-                                {
-                                    dataString += value.toFixed(3).replace(/\.?0+$/, '');
-                                }
-                            }
+                            type = 8;
                         }
-                    }
-                    else
-                    {
-                        for (j = 0; j < length; j += 1)
+                        else if (data instanceof Int8Array)
                         {
-                            if (j)
-                            {
-                                dataString += ',';
-                            }
-                            dataString += data[j];
+                            type = -8;
                         }
-                    }
-                    dataString += ']';
-                }
-            }
-        }
-
-        dataString += '],"objects":[';
-        var objects = this.objects;
-        addValuesComma = false;
-        var objectsBin, object;
-        for (p in objects)
-        {
-            if (objects.hasOwnProperty(p))
-            {
-                objectsBin = objects[p];
-                binLength = objectsBin.length;
-                for (n = 0; n < binLength; n += 2)
-                {
-                    id = objectsBin[n];
-                    object = objectsBin[n + 1];
-                    length = object.length;
-                    if (addValuesComma)
-                    {
-                        dataString += ',';
-                    }
-                    else
-                    {
-                        addValuesComma = true;
-                    }
-                    dataString += id + ',[';
-                    for (j = 0; j < length; j += 1)
-                    {
-                        if (j)
+                        else if (data instanceof Uint16Array)
                         {
-                            dataString += ',';
+                            type = 16;
                         }
-                        var value = object[j];
-                        if (typeof value === "string")
+                        else if (data instanceof Int16Array)
                         {
-                            dataString += '"' + value + '"';
+                            type = -16;
                         }
-                        else if (typeof value === "number")
+                        else if (data instanceof Uint32Array)
                         {
-                            valueInt = (value | 0);
-                            if (valueInt === value)
-                            {
-                                dataString += valueInt;
-                            }
-                            else
-                            {
-                                dataString += value.toFixed(4).replace(/\.?0+$/, '');
-                            }
+                            type = 32;
                         }
                         else
                         {
-                            dataString += value;
+                            type = -32;
+                        }
+
+                        ints[offset] = type;
+                        offset += 1;
+                    }
+
+                    if (integers)
+                    {
+                        var out = new data.constructor(ints.buffer, (offset * 4), length);
+                        for (j = 0; j < length; j += 1)
+                        {
+                            out[j] = data[j];
+                        }
+
+                        // pad element size to multiple of 4
+                        offset += ((data.byteLength + 3) >>> 2);
+                    }
+                    else
+                    {
+                        data = new Int32Array(data.buffer, 0, data.length);
+                        for (j = 0; j < length; j += 1)
+                        {
+                            ints[offset] = data[j];
+                            offset += 1;
                         }
                     }
-                    dataString += ']';
                 }
             }
         }
-        dataString += ']}';
-        return dataString;
+
+        // sentinel
+        ints[offset] = -1;
+        offset += 1;
+
+        return offset;
+    }
+
+    public getDataBuffer()
+    {
+        var totalSize = 4 + 4; // header + version
+        totalSize += this._getDataBinSize(this.integerData, true);
+        totalSize += this._getDataBinSize(this.floatData, false);
+
+        var buffer = new ArrayBuffer(totalSize);
+
+        var bytes = new Uint8Array(buffer);
+
+        var header = 'TZBD';
+        bytes[0] = header.charCodeAt(0);
+        bytes[1] = header.charCodeAt(1);
+        bytes[2] = header.charCodeAt(2);
+        bytes[3] = header.charCodeAt(3);
+
+        var ints = new Int32Array(buffer);
+        ints[1] = 1; // version
+
+        var offset = 2;
+        offset = this._getDataBinBuffer(ints, offset, this.integerData, true);
+        offset = this._getDataBinBuffer(ints, offset, this.floatData, false);
+
+        return bytes;
     }
 
     public getResourcesString()
@@ -2031,6 +2225,25 @@ class CaptureGraphicsDevice
                 renderTargets: this.renderTargets
             }
         });
+    }
+
+    private _recycleDataBinIds(dataBins)
+    {
+        var recycledIds = this.recycledIds;
+        var dataBin, binLength, p, n;
+        for (p in dataBins)
+        {
+            if (dataBins.hasOwnProperty(p))
+            {
+                dataBin = dataBins[p];
+                binLength = dataBin.length;
+                for (n = 0; n < binLength; n += 2)
+                {
+                    recycledIds.push(dataBin[n]);
+                }
+                dataBin.length = 0;
+            }
+        }
     }
 
     public reset()
@@ -2057,42 +2270,12 @@ class CaptureGraphicsDevice
         }
         this.numCommands = 0;
 
-        // Clean data array and reclaim the ids for reuse
+        // Clean data bins and reclaim the ids for reuse
+        this._recycleDataBinIds(this.integerData);
+        this._recycleDataBinIds(this.floatData);
+        this._recycleDataBinIds(this.objects);
+
         var recycledIds = this.recycledIds;
-        var dataBins = this.data;
-        var dataBin, binLength;
-        var p;
-        for (p in dataBins)
-        {
-            if (dataBins.hasOwnProperty(p))
-            {
-                dataBin = dataBins[p];
-                binLength = dataBin.length;
-                for (n = 0; n < binLength; n += 2)
-                {
-                    recycledIds.push(dataBin[n]);
-                }
-                dataBin.length = 0;
-            }
-        }
-
-        // Clean the objects dictionary and reclaim the ids for reuse
-        var objects = this.objects;
-        var objectsBin;
-        for (p in objects)
-        {
-            if (objects.hasOwnProperty(p))
-            {
-                objectsBin = objects[p];
-                binLength = objectsBin.length;
-                for (n = 0; n < binLength; n += 2)
-                {
-                    recycledIds.push(objectsBin[n]);
-                }
-                objectsBin.length = 0;
-            }
-        }
-
         if (this.destroyedIds.length)
         {
             recycledIds.push.apply(recycledIds, this.destroyedIds);
@@ -2123,6 +2306,9 @@ class CaptureGraphicsDevice
             }
         }
 
+        this.names = {};
+        this.numNames = 0;
+
         this.vertexBuffers = {};
         this.indexBuffers = {};
         this.techniqueParameterBuffers = {};
@@ -2148,9 +2334,12 @@ class CaptureGraphicsDevice
         this.lastId = -1;
         this.recycledIds = null;
         this.destroyedIds = null;
-        this.data= null;
+        this.integerData = null;
+        this.floatData = null;
         this.objects = null;
         this.objectArray = null;
+        this.names = null;
+        this.numNames = 0;
         this.vertexBuffers = null;
         this.indexBuffers = null;
         this.techniqueParameterBuffers = null;
@@ -2460,21 +2649,101 @@ class PlaybackGraphicsDevice
         resourcesObject.resources = {};
     }
 
-    public addData(dataObject)
+    public addData(dataBuffer)
     {
-        var data = dataObject.data;
-        var length = data.length;
-        var n;
-        for (n = 0; n < length; n += 2)
-        {
-            this._storeEntity(data[n], data[n + 1]);
-        }
-        data.length = 0;
+        var ints = new Int32Array(dataBuffer);
 
+        // TODO: chech version number and endianness
+        var offset = 2;
+        var binLength, length, n, id, type, data;
+
+        // Integers
+        while (true)
+        {
+            binLength = ints[offset];
+            offset += 1;
+            if (binLength < 0)
+            {
+                break;
+            }
+
+            length = ints[offset];
+            offset += 1;
+
+            for (n = 0; n < binLength; n += 1)
+            {
+                id = ints[offset];
+                offset += 1;
+
+                type = ints[offset];
+                offset += 1;
+
+                if (type === 8)
+                {
+                    data = new Uint8Array(dataBuffer, (offset * 4), length);
+                }
+                else if (type === -8)
+                {
+                    data = new Int8Array(dataBuffer, (offset * 4), length);
+                }
+                else if (type === 16)
+                {
+                    data = new Uint16Array(dataBuffer, (offset * 4), length);
+                }
+                else if (type === -16)
+                {
+                    data = new Int16Array(dataBuffer, (offset * 4), length);
+                }
+                else if (type === 32)
+                {
+                    data = new Uint32Array(dataBuffer, (offset * 4), length);
+                }
+                else
+                {
+                    data = new Int32Array(dataBuffer, (offset * 4), length);
+                }
+
+                this._storeEntity(id, data);
+
+                // pad element size to multiple of 4
+                offset += ((data.byteLength + 3) >>> 2);
+            }
+        }
+
+        // Floats
+        while (true)
+        {
+            binLength = ints[offset];
+            offset += 1;
+            if (binLength < 0)
+            {
+                break;
+            }
+
+            length = ints[offset];
+            offset += 1;
+
+            for (n = 0; n < binLength; n += 1)
+            {
+                id = ints[offset];
+                offset += 1;
+
+                data = new Float32Array(dataBuffer, (offset * 4), length);
+
+                this._storeEntity(id, data);
+
+                offset += length;
+            }
+        }
+    }
+
+    public addFrames(framesObject, reset?)
+    {
         var gd = this.gd;
-        var objects = dataObject.objects;
-        length = objects.length;
-        var id, fileObject, object, objectLength, j, k, v, entity;
+        var names = framesObject.names;
+        var objects = framesObject.objects;
+        var length = objects.length;
+        var id, fileObject, object, objectLength, n, j, k, v, entity;
         for (n = 0; n < length; n += 2)
         {
             id = objects[n];
@@ -2483,17 +2752,11 @@ class PlaybackGraphicsDevice
             object = gd.createTechniqueParameters();
             for (j = 0; j < objectLength; j += 2)
             {
-                k = fileObject[j];
+                k = names[fileObject[j]];
                 v = fileObject[j + 1];
                 if (typeof v === "string")
                 {
-                    entity = this._resolveEntity(v);
-                    if (entity instanceof Array)
-                    {
-                        entity = new Float32Array(entity);
-                        this._storeEntity(v, entity);
-                    }
-                    object[k] = entity;
+                    object[k] = this._resolveEntity(v);
                 }
                 else
                 {
@@ -2503,16 +2766,14 @@ class PlaybackGraphicsDevice
             this._storeEntity(id, object);
         }
         objects.length = 0;
-    }
+        names.length = 0;
 
-    public addFrames(framesObject, reset?)
-    {
         var commands = framesObject.commands;
         var numCommands = commands.length;
         var fileFrames = framesObject.frames;
         var numFileFrames = fileFrames.length;
         var frames = this.frames;
-        var n, c, command, cmdId;
+        var c, command, cmdId;
         if (reset)
         {
             var numFrames = frames.length;
